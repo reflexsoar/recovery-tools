@@ -9,6 +9,7 @@ elasticsearch = "*"
 pyaml-env = "*"
 opensearch-dsl = "*"
 opensearch-py = "*"
+tqdm = "*"
 
 [dev-packages]
 autopep8 = "*"

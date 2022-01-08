@@ -6,6 +6,3 @@ elasticsearch:
   use_ssl: true
   tls_verifynames: false
   distro: opensearch
-
-reflex:
-  version: 0.1.0

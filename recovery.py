@@ -7,6 +7,7 @@ import os
 import json
 import logging
 import time
+import tqdm
 from datetime import datetime
 from argparse import ArgumentParser
 from typing import Any
@@ -27,7 +28,7 @@ def backup(backup_path: str,  archive_password: str, archive_name: str, compress
         True|False - Backup succeeded or didn't    
     '''
 
-    backup_successful = False
+    backup_successful = True
 
     es = connections.get_connection()
 
@@ -51,7 +52,8 @@ def backup(backup_path: str,  archive_password: str, archive_name: str, compress
             "size": "1000"
         }
 
-        file_path = os.path.join(backup_path, f"{index}.json")
+        filename =  f"{index}.json"
+        file_path = os.path.join(backup_path, filename)
 
         docs = []
 
@@ -61,28 +63,84 @@ def backup(backup_path: str,  archive_password: str, archive_name: str, compress
 
         with open(file_path, 'w') as f:
             f.write(json.dumps(docs))
+        
+        if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+            logging.error(f'Failed to backup {filename}')
+            backup_successful = False
 
     return backup_successful
 
 
-def document_stream(document: dict, index_name: str) -> dict:
+def document_stream(documents: list) -> dict:
     '''
     Creates a dictionary object that elasticsearch/opensearch streaming_bulk
     uses to insert documents into an index
 
     Parameters:
-        document (dict): The source document to index
-        index_name (str): The index to send the document to
+        documents (list): A list of source documents to insert
     '''
-    yield {
-        "_index": index_name,
-        "_type": "_doc",
-        "_source": document
-    }
+    for doc in documents:
+        yield doc
 
 
-def restore():
-    raise NotImplementedError
+def restore(backup_path: str,  archive_password: str, archive_name: str, prefix: str) -> bool:
+    '''
+    Restores Reflex data from an archive or a directory of JSON files
+
+    Parameters:
+        backup_path (str): The directory where the raw JSON data should be placed
+        archive_name (str): The name of the archive to compress backups into
+        archive_password (str): When set the archive will be password protected
+        prefix (str): Assigns a prefix to the new indices, one would rarely use this but it is useful
+                      for testing purposes
+
+    Returns:
+        True|False - Restore succeeded or didn't 
+    '''
+
+    restore_success = True
+
+    es = connections.get_connection()
+
+    # Make sure the backup path exists
+    if not os.path.exists(backup_path):
+        logging.error(f"Unable to locate {backup_path}")
+        return False
+
+    for folder_name, sub_folders, filenames in os.walk(backup_path):
+        for filename in filenames:
+            if filename.endswith('.json'):
+
+                # Determine the index alias name to use
+                index_name = filename.split('.')[0]
+                if prefix not in ['', None]:
+                    index_name = f"{prefix}-{index_name}"
+
+                logging.info(f"Restoring index {index_name}")
+
+                # Calculate the full file path
+                file_path = os.path.join(folder_name, filename)
+
+                # Read in the backup data
+                with open(file_path, 'r') as f:
+                    data = f.read()
+
+                documents = json.loads(data)
+
+                total_documents = len(documents)
+
+                progress = tqdm.tqdm(unit='docs', total=total_documents)
+                successes = 0
+                for ok, response in streaming_bulk(es, index=index_name, actions=document_stream(documents), chunk_size=250):
+                    progress.update(1)
+                    successes += ok
+
+                if successes == total_documents:
+                    logging.info(f'All documents restored for {index_name}')
+                else:
+                    logging.warning(f'Not all documents were restored for {index_name}. {successes}/{total_documents}')
+    
+    return restore_success
 
 
 def load_config(path="config.yml") -> dict:
@@ -97,7 +155,6 @@ def load_config(path="config.yml") -> dict:
     Returns:
         config (dict): A dictionary object containing configuration information
     '''
-    config_error = False
     config = parse_config(path)
 
     return config
@@ -151,8 +208,8 @@ if __name__ == "__main__":
     parser.add_argument('--archive-password', '-p', type=str,
                         help="The password to encrypt the backup archive with", required=False)
     parser.add_argument('--compress-backup', help="If flagged the backup files will be archived", required=False, default=False, action="store_true")
-    parser.add_argument('--reflex-version', '-v', type=str,
-                        help="The version of Reflex being worked on", required=False)
+    parser.add_argument('--index-prefix', '-v', type=str,
+                        help="Adds a prefix to restored indices", required=False)
     parser.add_argument('--es-distro', help="The elasticsearch/opensearch disto",
                         required=False, choices=['elasticsearch', 'opensearch'])
     parser.add_argument(
@@ -187,22 +244,26 @@ if __name__ == "__main__":
         args.es_tls_verifiynames = config['elasticsearch']['tls_verifynames']
         args.es_distro = config['elasticsearch']['distro']
         args.es_cacert = config['elasticsearch']['cacert']
-        
-        args.reflex_version = config['reflex']['version']
+    
 
     # Import the tools we need from opensearch if es_distro is opensearch
     if args.es_distro == 'opensearch':
-        from opensearchpy import OpenSearch as client
         from opensearchpy.helpers import streaming_bulk, scan
-        from opensearch_dsl import Document, connections
+        from opensearch_dsl import connections
 
     # Import the tools we need from elasticsearch if es_distro is elasticsearch
     if args.es_distro == 'elasticsearch':
-        from elasticsearch import Elasticsearch as client
         from elasticsearch.helpers import streaming_bulk, scan
-        from elasticsearch_dsl import Document, connections
+        from elasticsearch_dsl import connections
 
     build_es_connection(connections, args.es_hosts, args.es_username,
                         args.es_password, args.es_use_tls, args.es_tls_verifynames, args.es_cacert)
 
-    backup(args.backup_path, args.archive_password, args.archive_name, args.compress_backup)
+    if args.mode == 'backup':
+        logging.info(f"Backup up Reflex data to {args.backup_path}")
+        backup(args.backup_path, args.archive_password, args.archive_name, args.compress_backup)
+    
+    if args.mode == 'restore':
+        logging.info(f"Restoring Reflex data from {args.backup_path}")
+        restore(args.backup_path, args.archive_password, args.archive_name, args.index_prefix)
+
