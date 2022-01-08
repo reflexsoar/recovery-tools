@@ -1,0 +1,11 @@
+elasticsearch:
+  hosts: ['localhost:9200']
+  username: admin
+  password: admin
+  cacert: ''
+  use_ssl: true
+  tls_verifynames: false
+  distro: opensearch
+
+reflex:
+  version: 0.1.0
